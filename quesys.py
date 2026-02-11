@@ -4,7 +4,6 @@
 #     "fastapi",
 #     "uvicorn",
 #     "python-escpos[usb]",
-#     "gpiozero",
 #     "jinja2",
 #     "rpi-lgpio",
 # ]
@@ -14,37 +13,33 @@ import json
 import time
 import os
 import subprocess
+import threading
 from datetime import datetime
-from typing import List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.responses import HTMLResponse
 from escpos.printer import Usb, Dummy
-from gpiozero import Button
+
+# Import the library that you confirmed works
+import RPi.GPIO as GPIO
 
 # --- CONFIGURATION ---
 DB_FILE = "queue_db.json"
-ADMIN_URL = "secret-admin-panel" # Access at http://pi-ip:8000/secret-admin-panel
-SOUND_FILE = "ding.wav"          # Put a wav file in the same folder
-GPIO_PIN = 17                    # Wire Button: GPIO17 & GND
+ADMIN_URL = "secret-admin-panel" 
+SOUND_FILE = "ding.wav"
+GPIO_PIN = 17  
 
 # PRINTER CONFIG (Run 'lsusb' to find these!)
-PRINTER_VENDOR_ID = 0x04b8       # Replace with your Vendor ID
-PRINTER_PRODUCT_ID = 0x0202      # Replace with your Product ID
+PRINTER_VENDOR_ID = 0x04b8       
+PRINTER_PRODUCT_ID = 0x0202      
 
-# --- HARDWARE SETUP ---
+# --- HARDWARE SETUP: PRINTER ---
 try:
-    # Try connecting to real printer
     p = Usb(PRINTER_VENDOR_ID, PRINTER_PRODUCT_ID)
 except Exception:
-    print("⚠️ Printer not found. Using Dummy mode (printing to console).")
+    print("⚠️ Printer not found. Using Dummy mode.")
     p = Dummy()
-
-# Button setup (connects to GPIO and Ground)
-# bounce_time prevents double clicks
-btn = Button(GPIO_PIN, pull_up=True, bounce_time=0.5)
 
 # --- DATABASE HELPERS ---
 def load_db():
@@ -57,39 +52,34 @@ def save_db(data):
     with open(DB_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-# --- HARDWARE FUNCTIONS ---
+# --- ACTION FUNCTIONS ---
 def play_sound():
-    """Plays sound via HDMI/Audio Jack using ALSA"""
     if os.path.exists(SOUND_FILE):
-        # -N prevents blocking the thread
         subprocess.Popen(["aplay", "-N", SOUND_FILE])
 
 def print_ticket(number):
-    """Prints a ticket with HUGE numbers"""
     try:
         p.text("\n")
         p.set(align='center')
         p.text("YOUR NUMBER\n")
         p.text("----------------\n")
-        
-        # 4x Height and 4x Width (Max typically 8, but 4 is safe)
         p.set(align='center', width=4, height=4) 
         p.text(f"{number}\n")
-        
-        # Reset and cut
         p.set(align='center', width=1, height=1)
         p.text("\n")
         p.text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         p.cut()
     except Exception as e:
-        print(f"Print Error: {e}")
+        print(f"❌ Print Error: {e}")
 
 def handle_physical_button():
-    """Called when GPIO button is pressed"""
+    """Logic to run when button is pressed"""
+    print("🔘 Button press detected! Processing...")
+    
     db = load_db()
     ticket_num = db["next_id"]
     
-    # 1. Add to queue
+    # 1. Update DB
     ticket = {
         "number": ticket_num,
         "timestamp": datetime.now().strftime("%H:%M:%S")
@@ -99,26 +89,60 @@ def handle_physical_button():
     save_db(db)
     
     # 2. Print
-    print(f"🔘 Button Pressed! Printing ticket #{ticket_num}")
+    print(f"🖨️ Printing ticket #{ticket_num}")
     print_ticket(ticket_num)
 
-# Link GPIO event
-btn.when_pressed = handle_physical_button
+# --- BACKGROUND BUTTON MONITOR ---
+def monitor_button_loop():
+    """
+    Runs in a background thread. 
+    Polls the GPIO pin exactly like your working script.
+    """
+    print(f"👀 Monitoring GPIO {GPIO_PIN} for presses...")
+    
+    # Setup GPIO
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(GPIO_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    
+    last_state = 1 # 1 is unpressed (Pull Up)
+    
+    while True:
+        try:
+            current_state = GPIO.input(GPIO_PIN)
+            
+            # If button went from HIGH (1) to LOW (0)
+            if current_state == 0 and last_state == 1:
+                handle_physical_button()
+                time.sleep(0.5) # Debounce delay
+            
+            last_state = current_state
+            time.sleep(0.05) # Small sleep to save CPU
+            
+        except Exception as e:
+            print(f"GPIO Error: {e}")
+            time.sleep(1)
 
 # --- FASTAPI APP ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("✅ System Started. Press Ctrl+C to stop.")
+    # STARTUP: Launch the button listener thread
+    t = threading.Thread(target=monitor_button_loop, daemon=True)
+    t.start()
+    
+    print("✅ System Started. Go to http://localhost:8000")
     yield
+    # SHUTDOWN
     print("🛑 Shutting down.")
+    try:
+        GPIO.cleanup()
+    except:
+        pass
 
 app = FastAPI(lifespan=lifespan)
 
 # --- ROUTES ---
-
 @app.get("/", response_class=HTMLResponse)
 async def display_page():
-    """The Big Display (Kiosk)"""
     html = """
     <!DOCTYPE html>
     <html>
@@ -145,7 +169,7 @@ async def display_page():
                     document.getElementById('number').innerText = data.current;
                 } catch(e) { console.log(e); }
             }
-            setInterval(poll, 1000); // Check every 1 second
+            setInterval(poll, 1000);
             poll();
         </script>
     </body>
@@ -155,7 +179,6 @@ async def display_page():
 
 @app.get(f"/{ADMIN_URL}", response_class=HTMLResponse)
 async def admin_page():
-    """The Secret Admin Panel"""
     db = load_db()
     queue_list_html = ""
     for ticket in db["queue"]:
@@ -170,7 +193,6 @@ async def admin_page():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Admin Queue</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             body {{ font-family: sans-serif; padding: 20px; max-width: 600px; margin: 0 auto; }}
@@ -180,19 +202,16 @@ async def admin_page():
             button {{ background: #007bff; color: white; border: none; padding: 10px 20px; 
                       font-size: 16px; border-radius: 5px; cursor: pointer; }}
             button:active {{ background: #0056b3; }}
-            h2 {{ border-bottom: 2px solid #333; padding-bottom: 10px; }}
         </style>
     </head>
     <body>
         <h2>Uncalled Tickets</h2>
         <div id="list">{queue_list_html or "No one in queue!"}</div>
-        
         <script>
             async function callNumber(id) {{
                 await fetch('/api/call/' + id, {{ method: 'POST' }});
-                location.reload(); // Simple reload to refresh list
+                location.reload();
             }}
-            // Auto refresh admin list every 5 seconds to see new tickets
             setTimeout(() => location.reload(), 5000);
         </script>
     </body>
@@ -202,15 +221,12 @@ async def admin_page():
 
 @app.get("/api/status")
 async def get_status():
-    print("get status called")
     db = load_db()
     return {"current": db["current"]}
 
 @app.post("/api/call/{ticket_id}")
 async def call_number(ticket_id: int, background_tasks: BackgroundTasks):
     db = load_db()
-    
-    # Find ticket
     found = False
     new_queue = []
     for t in db["queue"]:
@@ -223,13 +239,10 @@ async def call_number(ticket_id: int, background_tasks: BackgroundTasks):
         db["current"] = ticket_id
         db["queue"] = new_queue
         save_db(db)
-        
-        # Trigger sound in background
         background_tasks.add_task(play_sound)
         return {"status": "called", "number": ticket_id}
     
     raise HTTPException(status_code=404, detail="Ticket not found")
-
 if __name__ == "__main__":
     import uvicorn
     # 0.0.0.0 makes it accessible from other computers on the network
