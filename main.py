@@ -10,6 +10,8 @@
 # ///
 
 import json
+import logging
+import sys
 import time
 import os
 import subprocess
@@ -19,10 +21,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse
-from escpos.printer import Usb, Dummy
 
-# Import the library that you confirmed works
-import RPi.GPIO as GPIO
+DISPLAY_ONLY = "--display-only" in sys.argv
+
+if not DISPLAY_ONLY:
+    from escpos.printer import Usb, Dummy
+    import RPi.GPIO as GPIO
 
 # --- CONFIGURATION ---
 DB_FILE = "queue_db.json"
@@ -35,11 +39,12 @@ PRINTER_VENDOR_ID = 0x0fe6
 PRINTER_PRODUCT_ID = 0x811e      
 
 # --- HARDWARE SETUP: PRINTER ---
-try:
-    p = Usb(PRINTER_VENDOR_ID, PRINTER_PRODUCT_ID,  in_ep=0x82, out_ep=0x02)
-except Exception:
-    print("⚠️ Printer not found. Using Dummy mode.")
-    p = Dummy()
+if not DISPLAY_ONLY:
+    try:
+        p = Usb(PRINTER_VENDOR_ID, PRINTER_PRODUCT_ID,  in_ep=0x82, out_ep=0x02)
+    except Exception:
+        print("⚠️ Printer not found. Using Dummy mode.")
+        p = Dummy()
 
 # --- DATABASE HELPERS ---
 def load_db():
@@ -143,18 +148,21 @@ def monitor_button_loop():
 # --- FASTAPI APP ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # STARTUP: Launch the button listener thread
-    t = threading.Thread(target=monitor_button_loop, daemon=True)
-    t.start()
-    
-    print("✅ System Started. Go to http://localhost:8000")
+    if not DISPLAY_ONLY:
+        # STARTUP: Launch the button listener thread
+        t = threading.Thread(target=monitor_button_loop, daemon=True)
+        t.start()
+
+    mode = " (display only)" if DISPLAY_ONLY else ""
+    print(f"✅ System Started{mode}. Go to http://localhost:8000")
     yield
     # SHUTDOWN
     print("🛑 Shutting down.")
-    try:
-        GPIO.cleanup()
-    except:
-        pass
+    if not DISPLAY_ONLY:
+        try:
+            GPIO.cleanup()
+        except:
+            pass
 
 app = FastAPI(lifespan=lifespan)
 
@@ -167,18 +175,20 @@ async def display_page():
     <head>
         <title>Queue Display</title>
         <style>
-            body { background: #222; color: #fff; font-family: sans-serif; 
+            body { background: #222; color: #fff; font-family: monospace;
                    display: flex; justify-content: center; align-items: center; 
                    height: 100vh; margin: 0; text-align: center; }
-            h1 { font-size: 5vw; margin: 0; color: #aaa; }
-            #number { font-size: 35vw; font-weight: bold; line-height: 1; color: #f00; }
-            #history { font-size: 5vw; color: #666; margin-top: 2vh; letter-spacing: 0.1em; }
+            h1 { font-size: 3vw; margin: 0; color: #aaa; }
+            #number { font-size: 25vw; font-weight: bold; line-height: 1; color: #f00; }
+            #also { font-size: 2.5vw; margin-top: 2vh; color: #aaa; }
+            #history { font-size: 5vw; color: #f00; margin-top: 1vh; letter-spacing: 0.1em; white-space: pre-line; }
         </style>
     </head>
     <body>
         <div>
-            <h1>PALVELEE NUMEROA</h1>
+            <h1>palvelemme numeroa / we serve number</h1>
             <div id="number">...</div>
+            <div id="also">ja myös / and also</div>
             <div id="history"></div>
         </div>
         <script>
@@ -187,7 +197,8 @@ async def display_page():
                     let res = await fetch('/api/status');
                     let data = await res.json();
                     document.getElementById('number').innerText = data.current;
-                    document.getElementById('history').innerText = data.history.join('  ');
+                    let past = data.history.filter(n => n !== data.current).slice(0, 10);
+                    document.getElementById('history').innerText = past.slice(0, 5).join('  ') + '\\n' + past.slice(5, 10).join('  ');
                 } catch(e) { console.log(e); }
             }
             setInterval(poll, 200);
@@ -226,6 +237,7 @@ async def admin_page():
         </style>
     </head>
     <body>
+        <h2>Now Serving: {db["current"]}</h2>
         <h2>Uncalled Tickets</h2>
         <div id="list">{queue_list_html or "No one in queue!"}</div>
         <script>
@@ -242,6 +254,8 @@ async def admin_page():
 
 @app.get("/api/status")
 async def get_status():
+    if DISPLAY_ONLY:
+        return {"current": 42, "history": [42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32]}
     db = load_db()
     return {"current": db["current"], "history": db.get("history", [])}
 
@@ -260,15 +274,22 @@ async def call_number(ticket_id: int, background_tasks: BackgroundTasks):
         db["current"] = ticket_id
         db["queue"] = new_queue
         history = db.get("history", [])
+        history = [n for n in history if n != ticket_id]
         history.insert(0, ticket_id)
-        db["history"] = history[:5]
+        db["history"] = history[:11]
         save_db(db)
         background_tasks.add_task(play_sound)
         return {"status": "called", "number": ticket_id}
     
     raise HTTPException(status_code=404, detail="Ticket not found")
+class StatusFilter(logging.Filter):
+    def filter(self, record):
+        return "/api/status" not in record.getMessage()
+
 if __name__ == "__main__":
     import uvicorn
+    logging.getLogger("uvicorn.access").addFilter(StatusFilter())
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
     # 0.0.0.0 makes it accessible from other computers on the network
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
