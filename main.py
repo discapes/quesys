@@ -44,7 +44,7 @@ except Exception:
 # --- DATABASE HELPERS ---
 def load_db():
     if not os.path.exists(DB_FILE):
-        return {"current": "---", "next_id": 1, "queue": []}
+        return {"current": "---", "next_id": 1, "queue": [], "history": []}
     with open(DB_FILE, "r") as f:
         return json.load(f)
 
@@ -172,12 +172,14 @@ async def display_page():
                    height: 100vh; margin: 0; text-align: center; }
             h1 { font-size: 5vw; margin: 0; color: #aaa; }
             #number { font-size: 35vw; font-weight: bold; line-height: 1; color: #f00; }
+            #history { font-size: 5vw; color: #666; margin-top: 2vh; letter-spacing: 0.1em; }
         </style>
     </head>
     <body>
         <div>
             <h1>PALVELEE NUMEROA</h1>
             <div id="number">...</div>
+            <div id="history"></div>
         </div>
         <script>
             async function poll() {
@@ -185,6 +187,7 @@ async def display_page():
                     let res = await fetch('/api/status');
                     let data = await res.json();
                     document.getElementById('number').innerText = data.current;
+                    document.getElementById('history').innerText = data.history.join('  ');
                 } catch(e) { console.log(e); }
             }
             setInterval(poll, 200);
@@ -240,7 +243,7 @@ async def admin_page():
 @app.get("/api/status")
 async def get_status():
     db = load_db()
-    return {"current": db["current"]}
+    return {"current": db["current"], "history": db.get("history", [])}
 
 @app.post("/api/call/{ticket_id}")
 async def call_number(ticket_id: int, background_tasks: BackgroundTasks):
@@ -256,6 +259,9 @@ async def call_number(ticket_id: int, background_tasks: BackgroundTasks):
     if found:
         db["current"] = ticket_id
         db["queue"] = new_queue
+        history = db.get("history", [])
+        history.insert(0, ticket_id)
+        db["history"] = history[:5]
         save_db(db)
         background_tasks.add_task(play_sound)
         return {"status": "called", "number": ticket_id}
