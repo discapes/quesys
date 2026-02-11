@@ -187,7 +187,7 @@ async def display_page():
                     document.getElementById('number').innerText = data.current;
                 } catch(e) { console.log(e); }
             }
-            setInterval(poll, 1000);
+            setInterval(poll, 200);
             poll();
         </script>
     </body>
