@@ -46,16 +46,37 @@ if not DISPLAY_ONLY:
         print("⚠️ Printer not found. Using Dummy mode.")
         p = Dummy()
 
-# --- DATABASE HELPERS ---
-def load_db():
+# --- DATABASE ---
+DEFAULT_DB = {"current": "---", "next_id": 1, "queue": [], "history": []}
+
+def load_db_from_disk():
     if not os.path.exists(DB_FILE):
-        return {"current": "---", "next_id": 1, "queue": [], "history": []}
+        return dict(DEFAULT_DB)
     with open(DB_FILE, "r") as f:
         return json.load(f)
 
-def save_db(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+# In-memory state, loaded once at import time
+db = load_db_from_disk()
+
+def _save_db_worker():
+    """Background thread that writes DB snapshots to disk."""
+    while True:
+        snapshot = _save_queue.get()
+        try:
+            tmp = DB_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(snapshot)
+            os.replace(tmp, DB_FILE)
+        except Exception as e:
+            print(f"⚠️ Failed to write DB to disk: {e}")
+
+_save_queue = queue.Queue()
+_save_thread = threading.Thread(target=_save_db_worker, daemon=True)
+_save_thread.start()
+
+def save_db():
+    """Enqueue a snapshot for async write — never blocks the caller."""
+    _save_queue.put(json.dumps(db, indent=4))
 
 # --- ACTION FUNCTIONS ---
 #def play_sound():
@@ -97,10 +118,9 @@ def print_ticket(number):
 def handle_physical_button():
     """Logic to run when button is pressed"""
     print("🔘 Button press detected! Processing...")
-    
-    db = load_db()
+
     ticket_num = db["next_id"]
-    
+
     # 1. Update DB
     ticket = {
         "number": ticket_num,
@@ -108,7 +128,7 @@ def handle_physical_button():
     }
     db["queue"].append(ticket)
     db["next_id"] += 1
-    save_db(db)
+    save_db()
     
     # 2. Print
     print(f"🖨️ Printing ticket #{ticket_num}")
@@ -211,7 +231,6 @@ async def display_page():
 
 @app.get(f"/{ADMIN_URL}", response_class=HTMLResponse)
 async def admin_page():
-    db = load_db()
     queue_list_html = ""
     for ticket in db["queue"]:
         queue_list_html += f"""
@@ -256,12 +275,10 @@ async def admin_page():
 async def get_status():
     if DISPLAY_ONLY:
         return {"current": 42, "history": [42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32]}
-    db = load_db()
     return {"current": db["current"], "history": db.get("history", [])}
 
 @app.post("/api/call/{ticket_id}")
 async def call_number(ticket_id: int, background_tasks: BackgroundTasks):
-    db = load_db()
     found = False
     new_queue = []
     for t in db["queue"]:
@@ -269,7 +286,7 @@ async def call_number(ticket_id: int, background_tasks: BackgroundTasks):
             found = True
         else:
             new_queue.append(t)
-            
+
     if found:
         db["current"] = ticket_id
         db["queue"] = new_queue
@@ -277,7 +294,7 @@ async def call_number(ticket_id: int, background_tasks: BackgroundTasks):
         history = [n for n in history if n != ticket_id]
         history.insert(0, ticket_id)
         db["history"] = history[:11]
-        save_db(db)
+        save_db()
         background_tasks.add_task(play_sound)
         return {"status": "called", "number": ticket_id}
     
