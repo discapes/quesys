@@ -31,12 +31,12 @@ SOUND_FILE = "ding.wav"
 GPIO_PIN = 17  
 
 # PRINTER CONFIG (Run 'lsusb' to find these!)
-PRINTER_VENDOR_ID = 0x04b8       
-PRINTER_PRODUCT_ID = 0x0202      
+PRINTER_VENDOR_ID = 0x0fe6
+PRINTER_PRODUCT_ID = 0x811e      
 
 # --- HARDWARE SETUP: PRINTER ---
 try:
-    p = Usb(PRINTER_VENDOR_ID, PRINTER_PRODUCT_ID)
+    p = Usb(PRINTER_VENDOR_ID, PRINTER_PRODUCT_ID,  in_ep=0x82, out_ep=0x02)
 except Exception:
     print("⚠️ Printer not found. Using Dummy mode.")
     p = Dummy()
@@ -53,21 +53,38 @@ def save_db(data):
         json.dump(data, f, indent=4)
 
 # --- ACTION FUNCTIONS ---
+#def play_sound():
+#    if os.path.exists(SOUND_FILE):
+#        subprocess.Popen(["aplay", "-N", SOUND_FILE])
+current_sound_process = None
+
 def play_sound():
+    global current_sound_process
+    
+    # 1. If a sound is currently running, stop it to free the audio device
+    if current_sound_process is not None and current_sound_process.poll() is None:
+        try:
+            current_sound_process.terminate()
+            current_sound_process.wait(timeout=0.1) # Wait for it to actually let go
+        except Exception:
+            pass # Force kill if necessary or ignore errors
+
+    # 2. Play the new sound
     if os.path.exists(SOUND_FILE):
-        subprocess.Popen(["aplay", "-N", SOUND_FILE])
+        # -q quiets the text output
+        current_sound_process = subprocess.Popen(["aplay", "-q", SOUND_FILE])
 
 def print_ticket(number):
     try:
         p.text("\n")
         p.set(align='center')
-        p.text("YOUR NUMBER\n")
+        p.text("VUORONUMERO\n")
         p.text("----------------\n")
         p.set(align='center', width=4, height=4) 
         p.text(f"{number}\n")
         p.set(align='center', width=1, height=1)
-        p.text("\n")
-        p.text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        #p.text("\n")
+        #p.text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         p.cut()
     except Exception as e:
         print(f"❌ Print Error: {e}")
@@ -91,6 +108,7 @@ def handle_physical_button():
     # 2. Print
     print(f"🖨️ Printing ticket #{ticket_num}")
     print_ticket(ticket_num)
+    play_sound()
 
 # --- BACKGROUND BUTTON MONITOR ---
 def monitor_button_loop():
@@ -153,12 +171,12 @@ async def display_page():
                    display: flex; justify-content: center; align-items: center; 
                    height: 100vh; margin: 0; text-align: center; }
             h1 { font-size: 5vw; margin: 0; color: #aaa; }
-            #number { font-size: 35vw; font-weight: bold; line-height: 1; color: #0f0; }
+            #number { font-size: 35vw; font-weight: bold; line-height: 1; color: #f00; }
         </style>
     </head>
     <body>
         <div>
-            <h1>NOW SERVING</h1>
+            <h1>PALVELEE NUMEROA</h1>
             <div id="number">...</div>
         </div>
         <script>
