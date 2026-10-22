@@ -6,17 +6,22 @@
 #     "python-escpos[usb]",
 #     "jinja2",
 #     "rpi-lgpio",
+#     "pyfiglet",
+#     "pyyaml",
 # ]
 # ///
 
 import json
 import logging
 import queue
+import random
 import sys
 import time
 import os
 import subprocess
 import threading
+import textwrap
+from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
 
@@ -27,13 +32,19 @@ DISPLAY_ONLY = "--display-only" in sys.argv
 
 if not DISPLAY_ONLY:
     from escpos.printer import Usb, Dummy
+    from pyfiglet import Figlet
     import RPi.GPIO as GPIO
+    import yaml
+
+    with Path(__file__).with_name("quotes.yaml").open() as f:
+        quotes = yaml.safe_load(f)["quotes"]
 
 # --- CONFIGURATION ---
 DB_FILE = "queue_db.json"
 ADMIN_URL = "secret-admin-panel" 
 SOUND_FILE = "ding.wav"
 GPIO_PIN = 17  
+PRINT_COLUMNS = 32
 
 # PRINTER CONFIG (Run 'lsusb' to find these!)
 PRINTER_VENDOR_ID = 0x0fe6
@@ -103,15 +114,26 @@ def play_sound():
 
 def print_ticket(number):
     try:
+        quote = random.choice(quotes)
+        art = Figlet(font="standard", width=PRINT_COLUMNS).renderText(str(number)).rstrip().splitlines()
+        art_width = max(map(len, art))
+        separator = "-" * PRINT_COLUMNS + "\n"
+
+        p.hw("INIT")
+        p.set(align="center", font="a", normal_textsize=True)
         p.text("\n")
-        p.set(align='center')
-        p.text("VUORONUMERO\n")
-        p.text("----------------\n")
-        p.set(align='center', width=4, height=4) 
+        p.text(textwrap.fill(quote["quote"], PRINT_COLUMNS) + "\n")
+        if quote.get("speaker"):
+            p.text(textwrap.fill("- " + quote["speaker"], PRINT_COLUMNS) + "\n")
+        p.text(separator)
+        p.text("V U O R O N U M E R O\n")
+        p.text(separator)
+        p.set(align="center", custom_size=True, width=4, height=4)
         p.text(f"{number}\n")
-        p.set(align='center', width=1, height=1)
-        #p.text("\n")
-        #p.text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        p.set(align="center", normal_textsize=True)
+        p.text(separator)
+        # Equal line widths keep the FIGlet glyphs aligned when centered by the printer.
+        p.text("\n".join(line.ljust(art_width) for line in art) + "\n")
         p.cut()
     except Exception as e:
         print(f"❌ Print Error: {e}")
