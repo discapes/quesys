@@ -22,9 +22,9 @@ def print_ticket(number=67):
         p.set(align='center')
         p.text("VUORONUMERO\n")
         p.text("----------------\n")
-        p.set(align='center', width=4, height=4) 
+        p.set(align='center', custom_size=True, width=4, height=4)
         p.text(f"{number}\n")
-        p.set(align='center', width=1, height=1)
+        p.set(align='center', normal_textsize=True)
         p.cut()
     except Exception as e:
         print(f"❌ Print Error: {e}")
